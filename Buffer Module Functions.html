@@ -1,0 +1,564 @@
+<!doctype html>
+<html>
+    <!-- Load Leaflet from CDN -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.8.0/dist/leaflet.css" crossorigin="" />
+    <script src="https://unpkg.com/leaflet@1.8.0/dist/leaflet.js" crossorigin=""></script>
+
+    <!-- Load Esri Leaflet from CDN -->
+    <script src="https://unpkg.com/esri-leaflet@^3.0.8/dist/esri-leaflet.js"></script>
+    <script src="https://unpkg.com/esri-leaflet-vector@3.1.3/dist/esri-leaflet-vector.js"></script>
+
+    <!-- Load Esri Leaflet Vector from CDN -->
+    <script src="https://unpkg.com/esri-leaflet-vector@3.1.3/dist/esri-leaflet-vector.js"
+    integrity="sha512-2sbebld2cAnzUw4nloopGcKE7AGl7xUlCXg8amUWS47veGTKMH6tx1VsT7U9ukwXPAVzecigXK0jMtS5UcllDg=="
+    crossorigin=""></script>
+
+    <!-- Leaflet Draw -->
+    <!--
+    <script src="Leaflet.draw.js"></script>
+    <script src="Leaflet.Draw.Event.js"></script>
+    <link rel="stylesheet" src="leaflet.draw.css"></link>-->
+
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.2/dist/leaflet.draw-src.css" />
+    <script src="https://unpkg.com/leaflet-draw@1.0.2/dist/leaflet.draw-src.js"></script>
+
+
+    <!-- Turf -->
+    <script src='https://unpkg.com/@turf/turf@6/turf.min.js'></script>
+    <!--<script type="module" src="turf_buffer.js"></script>-->
+
+    <!-- Chart -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/2.5.0/Chart.min.js"></script>
+
+
+    
+    <script>
+        // Argument: elementToBuff(geojson), bufferValue(number), unit(string)
+        // Return: layer
+        function turfBuffer (elementToBuff, bufferValue, unit){
+            var buffered = turf.buffer(elementToBuff, bufferValue, {units: unit});
+            var bufferedLayer = L.geoJSON(buffered);
+            return bufferedLayer;
+        }
+        // Argument: geodata(geojson), layerData(layer)
+        // Polygon geodata Return: Array of arrays of [overlay area to polygon area ratio, intersected polygon geojson data, overlay area, polygon area, overlay geojson data]
+        // Polyline geodata Return: Array of arrays of [overlay length to polyline length ratio, intersected polyline geojson data, overlay length in miles, polyline length in miles, overlay geojson data]
+        // Point geodata Return: Array of arrays of [point geojson data]
+        function intersectedItems(geodata, layerData){
+            var features1 = geodata.features;
+            var intersectItems = [];
+            var layerDataJSON = layerData.toGeoJSON().features["0"];
+            // if first element in geojson data has polygon/multipolygon geometry
+            if (features1[0].geometry.type == "Polygon" || features1[0].geometry.type == "MultiPolygon"){
+                for (var i = 0; i < features1.length; i++){
+                    var overRide = turf.intersect(features1[i]["geometry"], layerDataJSON);
+                    if (overRide != null){
+                        var overRideArea = turf.area(overRide);
+                        var intersectItem = features1[i];
+                        var intersectItemArea = turf.area(features1[i]["geometry"]);
+                        var intersectedRatio = (overRideArea / intersectItemArea);
+                        var arrData = [intersectedRatio, intersectItem, overRideArea, intersectItemArea, overRide];
+                        intersectItems.push(arrData); 
+                    }
+                }
+            // if first element in geojson data has linestring/multilinestring geometry
+            } else if (features1[0].geometry.type == "LineString" || features1[0].geometry.type == "MultiLineString"){
+                for (var i = 0; i < features1.length; i++){
+                    var intersectionPoints = turf.lineIntersect(features1[i]["geometry"], layerDataJSON);
+                    // if lineString has intersection with user's geometry
+                    if (intersectionPoints.features.length != 0){
+                        var bufferedLine = turf.buffer(features1[i]["geometry"], 0.01, {units: "kilometers"});
+                        var overRide = turf.intersect(bufferedLine, layerDataJSON);
+                        if (overRide != null){
+                            var overRideArea = turf.area(overRide);
+                            var intersectItem = features1[i];
+                            var intersectItemArea = turf.area(bufferedLine);
+                            var intersectedRatio = (overRideArea / intersectItemArea);
+                            var intersectItemLength = turf.length(features1[i]["geometry"], {units: 'miles'});
+                            var overRideLength = intersectItemLength * intersectedRatio;
+                            var arrData = [intersectedRatio, intersectItem, overRideLength, intersectItemLength, overRide];
+                            intersectItems.push(arrData);
+                        }
+                    } else {
+                        // if lineString falls into user's geometry
+                        if (turf.booleanContains(layerDataJSON, features1[i]["geometry"])){
+                            var overRideLength = turf.length(features1[i]["geometry"], {units: 'miles'});
+                            var intersectItem = features1[i];
+                            var intersectItemLength = overRideLength;
+                            var arrData = [1.0, intersectItem, overRideLength, intersectItemLength, intersectItem];
+                            intersectItems.push(arrData);
+                        }
+                    }
+                }
+            // if first element in geojson data has point/multipoint geometry
+            } else if (features1[0].geometry.type == "Point" || features1[0].geometry.type == "MultiPoint"){
+                for (var i = 0; i < features1.length; i++){
+                    var pointInPolygon = turf.booleanPointInPolygon(features1[i]["geometry"], layerDataJSON);
+                    if (pointInPolygon){
+                        var intersectItem = features1[i];
+                        var arrData = [1.0, intersectItem, 1.0, 1.0, intersectItem];
+                        intersectItems.push(arrData);
+                    }
+                }
+            }
+            return intersectItems;
+        }
+        // Argument: geodata(geojson), layerData(layer)
+        // Return: Array of arrays of [overlay area to polygon area ratio, intersected polygon geojson data, overlay area, polygon area, overlay geojson data]
+        function intersectedItemsPolygon(geodata, layerData){
+            var features1 = geodata.features;
+            var intersectItems = [];
+            var layerDataJSON = layerData.toGeoJSON().features["0"];
+            for (var i = 0; i < features1.length; i++){
+                var overRide = turf.intersect(features1[i]["geometry"], layerDataJSON);
+                if (overRide != null){
+                    var overRideArea = turf.area(overRide);
+                    var intersectItem = features1[i];
+                    var intersectItemArea = turf.area(features1[i]["geometry"]);
+                    var intersectedRatio = (overRideArea / intersectItemArea);
+                    var arrData = [intersectedRatio, intersectItem, overRideArea, intersectItemArea, overRide];
+                    intersectItems.push(arrData);
+                }
+            }
+            return intersectItems;
+        }
+        // Argument: geodata(geojson), layerData(layer)
+        // Return: Array of arrays of [overlay length to polyline length ratio, intersected polyline geojson data, overlay length in miles, polyline length in miles, overlay geojson data]
+        function intersectedItemsPolyline(geodata, layerData){
+            var features1 = geodata.features;
+            var intersectItems = [];
+            var layerDataJSON = layerData.toGeoJSON().features["0"];
+            for (var i = 0; i < features1.length; i++){
+                var intersectionPoints = turf.lineIntersect(features1[i]["geometry"], layerDataJSON);
+                if (intersectionPoints.features.length != 0){
+                    var bufferedLine = turf.buffer(features1[i]["geometry"], 0.01, {units: 'kilometers'});
+                    var overRide = turf.intersect(bufferedLine, layerDataJSON);
+                    if (overRide != null){
+                        var overRideArea = turf.area(overRide);
+                        var intersectItem = features1[i];
+                        var intersectItemArea = turf.area(bufferedLine);
+                        var intersectedRatio = (overRideArea / intersectItemArea);
+                        var intersectItemLength = turf.length(features1[i]["geometry"], {units: 'miles'});
+                        var overRideLength = intersectItemLength * intersectedRatio;
+                        var arrData = [intersectedRatio, intersectItem, overRideLength, intersectItemLength, overRide];
+                        intersectItems.push(arrData);
+                    }
+                } else {
+                    if (turf.booleanContains(layerDataJSON, features1[i]["geometry"])){
+                        var overRideLength = turf.length(features1[i]["geometry"], {units: 'miles'});
+                        var intersectItem = features1[i];
+                        var intersectItemLength = overRideLength;
+                        var arrData = [1.0, intersectItem, overRideLength, intersectItemLength, intersectItem];
+                        intersectItems.push(arrData);
+                    }
+                }
+            }
+            return intersectItems;
+        }
+        // Argument: geodata(geojson), layerData(layer)
+        // Return: Array of arrays of [point geojson data]
+        function intersectedItemsPoint(geodata, layerData){
+            var features1 = geodata.features;
+            var intersectItems = [];
+            var layerDataJSON = layerData.toGeoJSON().features["0"];
+            for (var i = 0; i < features1.length; i++){
+                var pointInPolygon = turf.booleanPointInPolygon(features1[i]["geometry"], layerDataJSON);
+                if (pointInPolygon){
+                    var intersectItem = features1[i];
+                    var arrData = [1.0, intersectItem, 1.0, 1.0, intersectItem];
+                    intersectItems.push(arrData);
+                }
+            }
+            return intersectItems;
+        }
+
+        // Highlight only everything covered in buffer
+        // Argument: intersectedItems(2D array preferablely the returned array from function intersectedItems()), highlightStyle(CSS style for highlight area)
+        // Return: highlightLayer(layer)
+        function highlightOnlyOverlay(intersectedItems, highlightStyle){
+            var thisArr = [];
+            for (var i = 0; i < intersectedItems.length; i++){
+                if (intersectedItems[i].length >= 5){
+                    thisArr.push(intersectedItems[i][4]);
+                } else if (intersectedItems[i].length == 1){
+                    thisArr.push(intersectedItems[i][0]);
+                }
+            }
+            var dataJSON = {"type":"FeatureCollection", "features": thisArr};
+            var highlightLayer = L.geoJSON(dataJSON, {
+                style: highlightStyle
+            });
+            return highlightLayer;
+        }
+        // Highlight the geometries that touches the buffer
+        // Argument: intersectedItems(2D array preferablely the returned array from function intersectedItems()), highlightStyle(CSS style for highlight area)
+        // Return: highlightLayer(layer)
+        function highlightAllIntersected(intersectedItems, highlightStyle){
+            var thisArr = [];
+            for (var i = 0; i < intersectedItems.length; i++){
+                if (intersectedItems[i].length >= 5){
+                    thisArr.push(intersectedItems[i][1]);
+                } else if (intersectedItems[i].length == 1){
+                    thisArr.push(intersectedItems[i][0]);
+                }
+            }
+            var dataJSON = {"type":"FeatureCollection", "features": thisArr};
+            var highlightLayer = L.geoJSON(dataJSON, {
+                style: highlightStyle
+            });
+            return highlightLayer;
+        }
+
+        // Argument: geodata(geojson), layerData(layer)
+        // Return: Array of [intersected item's geojson]
+        function simpleIntersectedItems(geodata, layerData){
+            var features1 = geodata.features;
+            var intersectItems = [];
+            var layerDataJSON = layerData.toGeoJSON().features["0"];
+            for (var i = 0; i < features1.length; i++){
+                var intersectBoolean = turf.booleanIntersects(features1[i]["geometry"], layerDataJSON);
+                var containsBoolean = turf.booleanContains(layerDataJSON, features1[i]["geometry"]);
+                if (intersectBoolean || containsBoolean){
+                    intersectItems.push(features1[i]);
+                }
+            }
+            return intersectItems;
+        }
+
+        // Argument: data1(geojson of Polygon)
+        // Return: area
+        function calculateAreaJSON(data1){
+            var area = turf.area(data1.feautres.geometry);
+            return area;
+        }
+
+        // Argument: data1(geojson of Polyline), unit(string)
+        // Return: length
+        function calculateLengthJSON(data1, unit){
+            var length = turf.length(data1.features.geometry, {units: unit});
+            return length
+        }
+
+        // Argument: intersectedItems(2D array preferablely the returned array from function intersectedItems()),
+        //           attribute1(string), method(string), attribute2(string), displayId(DOM element id for displaying text result)
+        // Return: for method == ['aggregation', 'average', 'weighted average'] returns an array of [result value]
+        //         for method == ['categorical'] returns a 2D array of [x variable array, y variable array, result text]
+        function dataOutput(intersectItems, attribute1, method, attribute2, displayId){
+            if (intersectItems == null || intersectItems.length == 0){
+
+            } else {
+                if (method == "aggregation"){
+                    var resultVar = 0;
+                    for (var i = 0; i < intersectItems.length; i++){
+                        var itemValue = parseFloat(intersectItems[i][0]) * intersectItems[i][1]["properties"][attribute1];
+                        resultVar += itemValue;
+                    }
+                    if (!isNaN(resultVar)){
+                        resultVar = resultVar.toFixed(2);
+                        var display = document.getElementById(displayId);
+                        display.innerHTML = attribute1 + " (Aggregation): <strong>" + resultVar.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',') + "</strong>";
+                        var resultArr = [resultVar];
+                        return resultArr;
+                    }
+                } else if (method == "average"){
+                    var top = 0;
+                    var bottom = 0;
+                    for (var i = 0; i < intersectItems.length; i++){
+                        top += parseFloat(intersectItems[i][2]) * intersectItems[i][1]["properties"][attribute1];
+                        bottom += parseFloat(intersectItems[i][2]);
+                    }
+                    var resultVar = top / bottom;
+                    if (!isNaN(resultVar)){
+                        resultVar = resultVar.toFixed(2);
+                        var display = document.getElementById(displayId);
+                        display.innerHTML = attribute1 + " (Average): <strong>" + resultVar.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',') + "</strong>";
+                        var resultArr = [resultVar];
+                        return resultArr;
+                    }
+                } else if (method == "weighted average"){
+                    var top = 0;
+                    var bottom = 0;
+                    for (var i = 0; i < intersectItems.length; i++){
+                        var weighted = parseFloat(intersectItems[i][0]) * intersectItems[i][1]["properties"][attribute2];
+                        top += intersectItems[i][1]["properties"][attribute1] * weighted;
+                        bottom += weighted;
+                    }
+                    var resultVar = top / bottom;
+                    if (!isNaN(resultVar)){
+                        resultVar = resultVar.toFixed(2);
+                        var display = document.getElementById(displayId);
+                        display.innerHTML = attribute1 + " with weight " + attribute2 + " (Weighted Average): <strong>" + resultVar.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',') + "</strong>";
+                        var resultArr = [resultVar];
+                        return resultArr;
+                    }
+                } else if (method == "categorical"){
+                    intersectItems = intersectItems.sort(function(a, b){a[1]["properties"][attribute1] - b[1]["properties"][attribute1]});
+                    var xArr = [];
+                    var yArr = [];
+                    for (var i = 0; i < intersectItems.length; i++){
+                        if (!xArr.includes(intersectItems[i][1]["properties"][attribute1])){
+                            xArr.push(intersectItems[i][1]["properties"][attribute1]);
+                            yArr.push(parseFloat(intersectItems[i][2]));
+                        } else {
+                            var index = xArr.indexOf(intersectItems[i][1]["properties"][attribute1]);
+                            yArr[index] += parseFloat(intersectItems[i][2]);
+                        }
+                    }
+                    if (xArr.length < 20){
+                        var sum = 0;
+                        for (var i = 0; i < yArr.length; i++){
+                            sum += yArr[i];
+                        }
+                        for (var i = 0; i < yArr.length; i++){
+                            yArr[i] = (yArr[i] / sum);
+                        }
+                        var display = document.getElementById(displayId);
+                        var stringResult = "";
+                        for (var i = 0; i < xArr.length; i++){
+                            stringResult += "" + xArr[i] + " (" + attribute1 + "): <strong>" + (yArr[i] * 100).toFixed(2) + "%</strong>, ";
+                        }
+                        stringResult = stringResult.substring(0, stringResult.length - 2);
+                        display.innerHTML = stringResult;
+                        var resultArr = [xArr, yArr, stringResult];
+                        return resultArr;
+                    }
+                }
+
+            }
+        }
+        // Argument: data1(GeoJSON), selectContainerId(DOM Id for selects)
+        function createSelect(data1, selectContainerId){
+            var features1 = data1.features;
+            var container = document.getElementById(selectContainerId);
+            container.innerHTML = "";
+            var attributes = Object.keys(features1[0].properties);
+
+            var selectList1 = document.createElement("select");
+            selectList1.id = "Select1";
+            container.appendChild(selectList1);
+
+            var selectList2 = document.createElement("select");
+            selectList2.id = "Select2";
+            container.appendChild(selectList2);
+
+            var selectList3 = document.createElement("select");
+            selectList3.id = "Select3";
+            container.appendChild(selectList3);
+
+            var defaultOption1 = document.createElement("option");
+            defaultOption1.text = "Select Attribute";
+            defaultOption1.value = "default";
+            defaultOption1.style.color = "gray";
+            selectList1.appendChild(defaultOption1);
+            for (var i = 0; i < attributes.length; i++){
+                var option = document.createElement("option");
+                option.value = attributes[i];
+                option.text = attributes[i];
+                selectList1.appendChild(option);
+            }
+
+            var defaultOption2 = document.createElement("option");
+            defaultOption2.text = "Select Method";
+            defaultOption2.value = "default";
+            defaultOption2.style.color = "gray";
+            selectList2.appendChild(defaultOption2);
+            var methods = ["aggregation", "average", "weighted average", "categorical"];
+            for (var i = 0; i < methods.length; i++){
+                var option = document.createElement("option");
+                option.value = methods[i];
+                option.text = methods[i];
+                selectList2.appendChild(option);
+            }
+
+            selectList2.onchange = function(){
+                var secondSelectValue = selectList2.options[selectList2.selectedIndex].value;
+                if (secondSelectValue == "weighted average"){
+                    var selectList3 = document.createElement("select");
+                    if (document.getElementById("Select3") == null){
+                        container.appendChild(selectList3);
+                    } else {
+                        var oldList3 = document.getElementById("Select3");
+                        container.replaceChild(selectList3, oldList3);
+                    }
+                    selectList3.id = "Select3";
+                    var defaultOption3 = document.createElement("option");
+                    defaultOption3.text = "Select Second Attribute";
+                    defaultOption3.value = "default";
+                    defaultOption3.style.color = "gray";
+                    selectList3.appendChild(defaultOption3);
+                    for (var j = 0; j < attributes.length; j++){
+                        var option = document.createElement("option");
+                        option.text = attributes[j];
+                        option.value = attributes[j];
+                        selectList3.appendChild(option);
+                    }
+                } else {
+                    var selectList3 = document.createElement("select");
+                    if (document.getElementById("Select3") == null){
+                        container.appendChild(selectList3);
+                    } else{
+                        var oldList3 = document.getElementById("Select3");
+                        container.replaceChild(selectList3, oldList3);
+                    }
+                    selectList3.id = "Select3";
+                    var defaultOption3 = document.createElement("option");
+                    defaultOption3.text = "Locked";
+                    defaultOption3.value = "default";
+                    defaultOption3.style.color = "gray";
+                    selectList3.appendChild(defaultOption3);
+                }
+            }
+            selectList2.onchange();
+        }
+
+        // Argument: chartContainerId(DOM Id), xArr(chart x values array), yArr(chart y values array), barChartStyle(CSS Style),
+        //           pieChartStyle(CSS style), colorArr(color code array for charts), chartTitle(string)
+        function chartSetGenerator(chartContainerId, xArr, yArr, barChartStyle, pieChartStyle, colorArr, chartTitle){
+            var container = document.getElementById(chartContainerId);
+            container.innerHTML = "";
+            var barChart = document.createElement("canvas");
+            var pieChart = document.createElement("canvas");
+            barChart.style = barChartStyle;
+            pieChart.style = pieChartStyle;
+            container.appendChild(barChart);
+            container.appendChild(pieChart);
+            barChart.id = "bar";
+            pieChart.id = "pie";
+            barChart = new Chart("bar",{
+                type:"bar",
+                data:{
+                    labels: xArr,
+                    datasets:[{
+                        backgroundColor: colorArr,
+                        data: yArr
+                    }]
+                }, 
+                options:{
+                    legend: {display: false},
+                    title:{
+                        color:"#ffffff",
+                        display: true,
+                        text: chartTitle
+                    },
+                    responsive: false,
+                    responsiveAnimationDuration: 0,
+                    animation: false
+                }
+            });
+            barChart.update();
+            pieChart = new Chart("pie",{
+                type:"pie",
+                data:{
+                    labels: xArr,
+                    datasets:[{
+                        backgroundColor: colorArr,
+                        data: yArr
+                    }]
+                },
+                options:{
+                    legend:{display: false},
+                    title:{
+                        color: "#ffffff",
+                        display: true,
+                        text: chartTitle
+                    },
+                    responsive: false,
+                    responsiveAnimationDuration: 0,
+                    animation: false
+                }
+            });
+            pieChart.update();
+        }
+
+        // Argument: data1(geojson)
+        // Return: attributeTypeLookupTable(dictionary with key to every unique attribute name and value to keys corresponding value type)
+        function createValueTypeLookupTable(data1){
+            var attributeTypeLookupTable = {};
+            features1 = data1.features;
+            var attributeNames = Object.keys(features1[0].properties);
+            var attributeValues = Object.values(features1[0].properties);
+            for (var i = 0; i < attributeValues.length; i++){
+                if (isNaN(attributeValues[i])){
+                    attributeTypeLookupTable[attributeNames[i]] = "string";
+                } else {
+                    if (attributeValues[i].toString().indexOf('.') == -1){
+                        attributeTypeLookupTable[attributeNames[i]] = "int";
+                    } else {
+                        attributeTypeLookupTable[attributeNames[i]] = "float";
+                    }
+                }
+            }
+            for (var i = 0; i < features1.length; i++){
+                attributeValues = Object.values(features1[i].properties);
+                for (var j = 0; j < attributeValues.length; j++){
+                    if (attributeTypeLookupTable[attributeNames[j]] == "string"){
+
+                    } else {
+                        if (attributeTypeLookupTable[attributeNames[j]] == "int" && attributeValues[j].toString().indexOf('.') != -1 ){
+                            attributeTypeLookupTable[attributeNames[j]] = "float";
+                        }
+                    }
+                }
+            }
+            return attributeTypeLookupTable;
+        }
+
+        // Argument: size(int)
+        function generateRandomColorArray(size){
+            var letters = '0123456789ABCDEF';
+            var colorArr = new Array();
+            while(colorArr < size){
+                var color = '#';
+                for (var i = 0; i < 6; i++){
+                    color += letters[Math.floor(Math.random() * 16)];
+                }
+                if (!colorArr.includes(color)){
+                    colorArr.push(color);
+                }
+            }
+            return colorArr;
+        }
+
+        // testing function, doesn't work due to turf js lineSlice function's lack of accuracy,
+        // if alternative function is used, might be able to shorten the time complexity
+        // when calculating lineString data
+        // Future explore - HP
+        function lineSplit(line, splitter){
+            var splitOwn = turf.featureCollection([turf.lineString(line.geometry.coordinates)]);
+            // dispatch all intersections
+            var intersections = turf.lineIntersect(line, splitter).features;
+            for (var i = 0; i < intersections.length; i++){
+                var point = intersections[i];
+                // check if intersection is on line
+                for (var j = 0; j < splitOwn.features.length; j++){
+                    var lineString = splitOwn.features[j];
+
+                    if (!point){
+                        break;
+                    }
+                    if (turf.pointToLineDistance(point, lineString) > 0.00001){
+                        continue;
+                    }
+                    // split line into two
+                    splitOwn.features.splice(j, 1);
+                    var pointStart = turf.point(lineString.geometry.coordinates[0]);
+                    var pointStop = turf.point(
+                        lineString.geometry.coordinates[lineString.geometry.coordinates.length - 1]
+                    );
+                    splitOwn.features.push(turf.lineSlice(pointStart, point, line));
+                    splitOwn.features.push(turf.lineSlice(point, pointStop, line));
+
+                    point = null;
+                }
+            }
+            // remove short splits
+            for (var i = splitOwn.features.length - 1; i >= 0; i--){
+                if (turf.length(splitOwn.features[i]) < 0.00001){
+                    splitOwn.features.splice(i, 1);
+                }
+            }
+            return splitOwn;
+        }
+
+    </script>
+</html>
